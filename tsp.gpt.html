@@ -1,0 +1,350 @@
+/*
+Project: Interactive TSP Map App (React + Tailwind + Mapbox GL JS)
+Tech Stack:
+- Frontend: React, Tailwind CSS, Mapbox GL JS, GPT API integration placeholder
+- Backend: FastAPI + Google OR-Tools for TSP optimization
+*/
+
+// File Structure (monorepo style)
+// ├── frontend/
+// │   ├── public/
+// │   │   └── index.html
+// │   ├── src/
+// │   │   ├── App.jsx
+// │   │   ├── index.jsx
+// │   │   ├── components/
+// │   │   │   ├── MapView.jsx
+// │   │   │   ├── Sidebar.jsx
+// │   │   │   ├── ChatAssistant.jsx
+// │   │   │   └── ExportButtons.jsx
+// │   │   ├── hooks/
+// │   │   │   └── useLocalStorage.js
+// │   │   └── utils/
+// │   │       └── api.js
+// │   └── tailwind.config.js
+// └── backend/
+//     ├── main.py
+//     ├── requirements.txt
+//     └── or_tools_tsp.py
+
+/* ---------- FRONTEND ---------- */
+
+// frontend/src/index.jsx
+import React from 'react';
+import ReactDOM from 'react-dom/client';
+import App from './App';
+import './index.css';
+
+ReactDOM.createRoot(document.getElementById('root')).render(
+  <React.StrictMode>
+    <App />
+  </React.StrictMode>
+);
+
+// frontend/src/App.jsx
+import React, { useState, useEffect } from 'react';
+import MapView from './components/MapView';
+import Sidebar from './components/Sidebar';
+import ChatAssistant from './components/ChatAssistant';
+import ExportButtons from './components/ExportButtons';
+import { optimizeRoute } from './utils/api';
+
+export default function App() {
+  const [pins, setPins] = useState([]);
+  const [route, setRoute] = useState(null);
+  const [darkMode, setDarkMode] = useState(false);
+
+  useEffect(() => {
+    // load saved pins from localStorage
+    const saved = JSON.parse(localStorage.getItem('tsp_pins') || '[]');
+    setPins(saved);
+  }, []);
+
+  useEffect(() => {
+    localStorage.setItem('tsp_pins', JSON.stringify(pins));
+    // auto re-optimize on change
+    if (pins.length > 1) handleOptimize();
+  }, [pins]);
+
+  const addPin = coord => setPins([...pins, coord]);
+  const removePin = idx => setPins(pins.filter((_, i) => i !== idx));
+  const reorderPins = newOrder => setPins(newOrder);
+
+  const handleOptimize = async () => {
+    const { order, distance } = await optimizeRoute(pins);
+    const orderedCoords = order.map(i => pins[i]);
+    setRoute({ coords: orderedCoords, distance });
+  };
+
+  return (
+    <div className={darkMode ? 'dark' : ''}>
+      <div className="flex h-screen">
+        <Sidebar
+          pins={pins}
+          removePin={removePin}
+          reorderPins={reorderPins}
+          optimizeNow={handleOptimize}
+          darkMode={darkMode}
+          toggleDark={() => setDarkMode(!darkMode)}
+        />
+        <MapView
+          pins={pins}
+          addPin={addPin}
+          route={route}
+        />
+        <ChatAssistant addPin={addPin} optimizeNow={handleOptimize} />
+      </div>
+      <ExportButtons pins={pins} route={route} />
+    </div>
+  );
+}
+
+/* ---------- MapView.jsx ---------- */
+import React, { useRef, useEffect } from 'react';
+import mapboxgl from 'mapbox-gl';
+import 'mapbox-gl/dist/mapbox-gl.css';
+
+mapboxgl.accessToken = process.env.REACT_APP_MAPBOX_TOKEN;
+
+export default function MapView({ pins, addPin, route }) {
+  const mapContainer = useRef();
+  const mapRef = useRef();
+
+  useEffect(() => {
+    mapRef.current = new mapboxgl.Map({
+      container: mapContainer.current,
+      style: 'mapbox://styles/mapbox/streets-v12',
+      center: [-74.0060, 40.7128], // NYC
+      zoom: 12,
+      pitch: 45,
+      antialias: true,
+    });
+
+    mapRef.current.on('click', e => {
+      addPin([e.lngLat.lng, e.lngLat.lat]);
+    });
+  }, []);
+
+  useEffect(() => {
+    // clear existing markers
+    document.querySelectorAll('.marker').forEach(el => el.remove());
+    // add pins
+    pins.forEach(([lng, lat]) => {
+      new mapboxgl.Marker({ className: 'marker' })
+        .setLngLat([lng, lat])
+        .addTo(mapRef.current);
+    });
+
+    // draw route polyline animated
+    if (route) {
+      const coords = route.coords;
+      mapRef.current.getSource('route') && mapRef.current.removeLayer('route');
+      mapRef.current.getSource('route') && mapRef.current.removeSource('route');
+      mapRef.current.addSource('route', {
+        type: 'geojson',
+        data: {
+          type: 'Feature',
+          geometry: { type: 'LineString', coordinates: coords },
+        },
+      });
+      mapRef.current.addLayer({
+        id: 'route',
+        type: 'line',
+        source: 'route',
+        paint: { 'line-width': 4 },
+      });
+    }
+  }, [pins, route]);
+
+  return <div ref={mapContainer} className="flex-1" />;
+}
+
+/* ---------- Sidebar.jsx ---------- */
+import React from 'react';
+import { DragDropContext, Droppable, Draggable } from 'react-beautiful-dnd';
+
+export default function Sidebar({ pins, removePin, reorderPins, optimizeNow, darkMode, toggleDark }) {
+  const onDragEnd = result => {
+    if (!result.destination) return;
+    const items = Array.from(pins);
+    const [reordered] = items.splice(result.source.index, 1);
+    items.splice(result.destination.index, 0, reordered);
+    reorderPins(items);
+  };
+
+  return (
+    <div className={`w-80 p-4 bg-white dark:bg-gray-800 flex flex-col`}>
+      <button onClick={toggleDark} className="mb-4">
+        Toggle {darkMode ? 'Light' : 'Dark'}
+      </button>
+      <button onClick={optimizeNow} className="mb-4 btn-primary">
+        Optimize Route
+      </button>
+      <DragDropContext onDragEnd={onDragEnd}>
+        <Droppable droppableId="pins">
+          {provided => (
+            <ul {...provided.droppableProps} ref={provided.innerRef}>
+              {pins.map((p, i) => (
+                <Draggable key={i} draggableId={`${i}`} index={i}>
+                  {p => (
+                    <li
+                      ref={p.innerRef}
+                      {...p.draggableProps}
+                      {...p.dragHandleProps}
+                      className="flex justify-between items-center p-2 mb-2 border rounded"
+                    >
+                      <span>{p.coordinates || `${p[1].toFixed(5)}, ${p[0].toFixed(5)}`}</span>
+                      <button onClick={() => removePin(i)}>✕</button>
+                    </li>
+                  )}
+                </Draggable>
+              ))}
+              {provided.placeholder}
+            </ul>
+          )}
+        </Droppable>
+      </DragDropContext>
+    </div>
+  );
+}
+
+/* ---------- ChatAssistant.jsx ---------- */
+import React, { useState } from 'react';
+// GPT integration placeholder
+export default function ChatAssistant({ addPin, optimizeNow }) {
+  const [input, setInput] = useState('');
+
+  const handleSend = () => {
+    // parse simple commands
+    if (/add (.+)/i.test(input)) {
+      // stub: call geocoding and then addPin
+    }
+    if (/optimize/i.test(input)) {
+      optimizeNow();
+    }
+    setInput('');
+  };
+
+  return (
+    <div className="absolute bottom-0 right-0 m-4 w-64 h-60 bg-white dark:bg-gray-900 p-2 rounded shadow-lg">
+      <div className="flex-1 overflow-auto">{/* chat log */}</div>
+      <div className="flex">
+        <input
+          className="flex-1 p-1 rounded-l border"
+          value={input}
+          onChange={e => setInput(e.target.value)}
+          placeholder="Command or chat..."
+        />
+        <button onClick={handleSend} className="px-2 bg-blue-500 text-white rounded-r">
+          Send
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/* ---------- ExportButtons.jsx ---------- */
+import React from 'react';
+export default function ExportButtons({ pins, route }) {
+  const download = (format) => {
+    const data = { pins, route };
+    let blob, filename;
+    if (format === 'csv') {
+      const rows = data.route.coords.map(c => c.join(','));
+      blob = new Blob([rows.join('\n')], { type: 'text/csv' });
+      filename = 'route.csv';
+    } // json, gpx omitted for brevity
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = filename; a.click();
+  };
+  return (
+    <div className="absolute top-4 right-4 flex space-x-2">
+      <button onClick={() => download('csv')} className="btn-secondary">Export CSV</button>
+      <button onClick={() => download('json')} className="btn-secondary">Export JSON</button>
+      <button onClick={() => download('gpx')} className="btn-secondary">Export GPX</button>
+    </div>
+  );
+}
+
+/* ---------- utils/api.js ---------- */
+export async function optimizeRoute(pins) {
+  const res = await fetch('http://localhost:8000/optimize', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ coords: pins }),
+  });
+  return res.json();
+}
+
+/* ---------- hooks/useLocalStorage.js ---------- */
+import { useState } from 'react';
+export function useLocalStorage(key, defaultValue) {
+  const [val, setVal] = useState(() => {
+    const saved = localStorage.getItem(key);
+    return saved ? JSON.parse(saved) : defaultValue;
+  });
+  const setter = (v) => {
+    setVal(v);
+    localStorage.setItem(key, JSON.stringify(v));
+  };
+  return [val, setter];
+}
+
+/* ---------- tailwind.config.js ---------- */
+module.exports = {
+  darkMode: 'class',
+  content: ['./src/**/*.{js,jsx,ts,tsx}', './public/index.html'],
+  theme: { extend: {} },
+  plugins: [],
+};
+
+/* ---------- BACKEND (FastAPI) ---------- */
+
+// backend/requirements.txt
+# fastapi
+# uvicorn[standard]
+# ortools
+// google-api-python-client if using GPT geocoding
+
+// backend/or_tools_tsp.py
+from ortools.constraint_solver import pywrapcp, routing_enums_pb2
+import math
+
+def solve_tsp(coords):
+    n = len(coords)
+    dist_matrix = [[
+        math.hypot(coords[i][0]-coords[j][0], coords[i][1]-coords[j][1])
+        for j in range(n)] for i in range(n)]
+    manager = pywrapcp.RoutingIndexManager(n, 1, 0)
+    routing = pywrapcp.RoutingModel(manager)
+
+    def dist_callback(i, j):
+        return int(dist_matrix[manager.IndexToNode(i)][manager.IndexToNode(j)] * 1000)
+    transit = routing.RegisterTransitCallback(dist_callback)
+    routing.SetArcCostEvaluatorOfAllVehicles(transit)
+    search = routing.DefaultRoutingSearchParameters()
+    search.first_solution_strategy = routing_enums_pb2.FirstSolutionStrategy.PATH_CHEAPEST_ARC
+    sol = routing.SolveWithParameters(search)
+    index = routing.Start(0)
+    route = []
+    while not routing.IsEnd(index):
+        route.append(manager.IndexToNode(index))
+        index = sol.Value(routing.NextVar(index))
+    route.append(manager.IndexToNode(index))
+    distance = sol.ObjectiveValue()/1000
+    return route, distance
+
+// backend/main.py
+from fastapi import FastAPI
+from pydantic import BaseModel
+from or_tools_tsp import solve_tsp
+
+app = FastAPI()
+
+class CoordsReq(BaseModel): coords: list[list[float]]
+
+@app.post('/optimize')
+def optimize(req: CoordsReq):
+    order, dist = solve_tsp(req.coords)
+    return {'order': order, 'distance': dist}
